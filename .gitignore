@@ -1,0 +1,8 @@
+node_modules/
+clones/
+data/
+.env
+dist/
+web/
+tmp/
+*.log

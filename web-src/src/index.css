@@ -1,0 +1,74 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* highlight.js — theme nhạt cho code block */
+@import 'highlight.js/styles/github.css';
+
+@layer base {
+  /* 100dvh: composer/bàn phím không bị thanh trình duyệt mobile che; fallback 100% cho trình duyệt cũ */
+  html, body, #root { height: 100%; height: 100dvh; }
+  body {
+    @apply bg-app text-ink antialiased;
+    font-family: theme('fontFamily.sans');
+    overscroll-behavior: none;              /* chặn pull-to-refresh / bounce toàn trang */
+    -webkit-tap-highlight-color: transparent;
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+  /* iOS tự zoom khi focus input <16px → ép ≥16px trên mobile (composer đang 14px) */
+  @media (max-width: 640px) {
+    textarea, input, select { font-size: 16px; }
+  }
+  /* Bàn phím mở (data-kb=open do useKeyboardViewport set) → bỏ padding home-indicator của composer */
+  html[data-kb="open"] .composer-bar { padding-bottom: 0.5rem !important; }
+}
+
+@layer components {
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg bg-brand px-3.5 py-2 text-sm font-semibold text-white
+           shadow-card transition hover:bg-brand-dark disabled:cursor-default disabled:opacity-50;
+  }
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-2 text-sm font-medium text-ink
+           transition hover:bg-slate-50 disabled:opacity-50;
+  }
+  .input {
+    @apply rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink outline-none
+           transition focus:border-brand focus:ring-2 focus:ring-brand/20 placeholder:text-muted;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full border border-brand/30 bg-brand/5 px-3 py-1.5 text-xs font-medium text-brand-dark
+           transition hover:border-brand/60 hover:bg-brand/10;
+  }
+}
+
+/* ── Markdown (bê từ adg) ───────────────────────────── */
+.markdown { @apply text-[14px] leading-relaxed text-ink; overflow-wrap: anywhere; }
+.markdown > :first-child { margin-top: 0; }
+.markdown > :last-child { margin-bottom: 0; }
+/* Mobile-native: không để code/bảng/URL dài đẩy tràn ngang — cuộn trong khối, gói chữ dài */
+.markdown pre, .markdown table { max-width: 100%; }
+.markdown a { word-break: break-word; }
+.markdown h1 { @apply mb-2 mt-3 text-xl font-extrabold text-navy; }
+.markdown h2 { @apply mb-2 mt-4 text-lg font-bold text-navy; }
+.markdown h3 { @apply mb-1.5 mt-3 text-base font-semibold text-navy; }
+.markdown p { @apply my-2; }
+.markdown ul { @apply my-2 list-disc pl-6; }
+.markdown ol { @apply my-2 list-decimal pl-6; }
+.markdown li { @apply my-0.5; }
+.markdown a { @apply text-brand underline underline-offset-2; }
+.markdown strong { @apply font-semibold text-navy; }
+.markdown code { @apply rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[12.5px] text-brand-dark; }
+.markdown pre { @apply my-2.5 overflow-auto rounded-lg border border-line bg-slate-50 p-3 text-[12.5px] leading-relaxed; }
+.markdown pre code { @apply bg-transparent p-0 text-ink; }
+.markdown blockquote { @apply my-2 border-l-2 border-brand/40 pl-3 text-muted; }
+.markdown table { @apply my-2 block w-full overflow-auto border-collapse text-[13px]; }
+.markdown th, .markdown td { @apply border border-line px-2.5 py-1.5 text-left; }
+.markdown th { @apply bg-slate-50 font-semibold text-navy; }
+.markdown hr { @apply my-3 border-line; }
+
+/* scrollbar mảnh */
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-thumb { @apply rounded-full bg-slate-300; }
+::-webkit-scrollbar-thumb:hover { @apply bg-slate-400; }
