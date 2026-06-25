@@ -2,11 +2,32 @@ import { useState, type ReactNode, isValidElement } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
-import type { ChatTurn } from '../useChat';
+import type { ChatTurn, OutFile } from '../useChat';
+import { FileViewer } from './FileViewer';
 import { ToolCard, toolLabel } from './ToolCard';
 import { D2Block } from './D2Block';
 import { fmtTime } from '../time';
 
+const KIND_ICON: Record<string, string> = { excel: '📊', word: '📝', pdf: '📄', html: '🌐' };
+const KIND_LABEL: Record<string, string> = { excel: 'Excel', word: 'Word', pdf: 'PDF', html: 'HTML' };
+function FileCard({ f }: { f: OutFile }) {
+  const [copied, setCopied] = useState(false);
+  const [open, setOpen] = useState(false);
+  const editable = f.kind === 'excel' || f.kind === 'word' || f.kind === 'html';
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-lg border border-line bg-slate-50 px-3 py-2 text-[12px]">
+      <span className="text-base">{KIND_ICON[f.kind] || '📄'}</span>
+      <span className="max-w-[50%] truncate font-semibold text-ink">{f.filename}</span>
+      <span className="rounded bg-white px-1.5 py-0.5 text-[10px] text-muted">{KIND_LABEL[f.kind] || f.kind}</span>
+      <div className="ml-auto flex items-center gap-2.5">
+        <button className="rounded-md border border-line bg-white px-2 py-1 font-medium text-ink transition hover:border-brand hover:text-brand-dark" onClick={() => setOpen(true)}>{editable ? '✏ Xem/Sửa' : '👁 Xem'}</button>
+        <a href={f.downloadUrl} download={f.filename} className="rounded-md bg-brand px-2.5 py-1 font-semibold text-white transition hover:bg-brand-dark">📥 Tải</a>
+        <button className="text-brand-dark hover:underline" onClick={() => navigator.clipboard.writeText(f.shareUrl).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); })}>{copied ? '✓ Đã copy' : '🔗 Link'}</button>
+      </div>
+      {open && <FileViewer file={f} onClose={() => setOpen(false)} />}
+    </div>
+  );
+}
 function Dots({ label }: { label: string }) {
   return (
     <div className="mt-1 flex items-center gap-2 text-xs font-medium text-brand-dark">
@@ -130,6 +151,11 @@ export function Message({ m, onPick }: { m: ChatTurn; onPick?: (t: string) => vo
           </div>
         );
       })()}
+      {!!m.outFiles?.length && (
+        <div className="mt-2 space-y-1.5">
+          {m.outFiles.map((f) => <FileCard key={f.id} f={f} />)}
+        </div>
+      )}
       {m.pending && <Dots label={label} />}
       {m.ask && (
         <div className="mt-2 rounded-xl border border-brand/30 bg-brand/5 p-3 text-sm">

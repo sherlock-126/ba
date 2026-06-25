@@ -33,6 +33,10 @@ export const config = {
     // Bật khi chạy sau HTTPS (cloudflared/production) để cookie có cờ Secure.
     cookieSecure: process.env.COOKIE_SECURE === '1',
   },
+  // URL gốc công khai để dựng link chia sẻ file (/f/:token).
+  public: {
+    baseUrl: process.env.PUBLIC_BASE_URL || 'https://ba.autonow.vn',
+  },
   admin: {
     email: process.env.ADMIN_EMAIL || 'admin@autonow.vn',
   },

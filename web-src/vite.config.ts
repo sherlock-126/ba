@@ -34,7 +34,8 @@ export default defineConfig({
         // runtimeCaching('/assets/') cache lúc tải đầu (tránh nuốt 8MB khi cài + tránh lỗi vượt cap).
         globPatterns: ['**/*.{css,html,woff2}'],
         navigateFallback: '/index.html',
-        navigateFallbackDenylist: [/^\/api/],
+        // KHÔNG để SW nuốt các route server (file public /f/, api, proxy /workspace) → để request đi tới server.
+        navigateFallbackDenylist: [/^\/api/, /^\/f\//, /^\/workspace/],
         cleanupOutdatedCaches: true,
         runtimeCaching: [
           {

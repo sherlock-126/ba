@@ -14,6 +14,8 @@ export type RunAgentOpts = {
   messages: ChatMsg[];
   abortController: AbortController;
   emit: (type: string, data: unknown) => void;
+  userId?: string;                                         // chủ sở hữu file AI sinh ra
+  openFile?: { kind: string; context: string };           // copilot: file đang mở trong canvas
   isAdmin?: boolean;                                       // admin → có tool truy vấn DB thật
   onAudit?: (action: string, target?: string, detail?: string) => void;
   images?: string[];                                       // ảnh đính kèm tin nhắn cuối (data URL)
@@ -27,17 +29,23 @@ function parseDataUrl(u: string): { mediaType: string; data: string } | null {
   return m ? { mediaType: m[1], data: m[2] } : null;
 }
 
-export async function runAgent(opts: RunAgentOpts): Promise<{ text: string }> {
+export async function runAgent(opts: RunAgentOpts): Promise<{ text: string; outFiles: any[] }> {
   const token = config.ai.oauthToken;
   if (token) process.env.CLAUDE_CODE_OAUTH_TOKEN = token;
   // Nới trần token output để bài ghi issue dài (mô tả + tiêu chí nghiệm thu) không bị cắt giữa chừng.
   if (!process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS) process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = '24000';
 
+  // Bắt sự kiện file_ready để LƯU kèm tin nhắn (mở lại hội thoại vẫn thấy thẻ file).
+  const outFiles: any[] = [];
+  const emit = (type: string, data: unknown) => { if (type === 'file_ready') outFiles.push(data); opts.emit(type, data); };
+
   const p = opts.project;
   // Khi CÓ dự án → luôn truyền mảng (mặc định rỗng) để khoanh vùng tuyệt đối:
   // dự án không khai dbKeys/serverKeys → KHÔNG có tool DB/log (tránh fallback về toàn bộ).
   const { server, allowedToolNames } = createCodeMcp({
-    emit: opts.emit, isAdmin: opts.isAdmin, onAudit: opts.onAudit,
+    emit, userId: opts.userId, isAdmin: opts.isAdmin, onAudit: opts.onAudit,
+    sheetOpen: opts.openFile?.kind === 'excel',
+    docOpen: opts.openFile?.kind === 'word' || opts.openFile?.kind === 'html',
     repoKeys: p ? p.repos : undefined,
     wsKeys: p ? p.workspaces : undefined,
     dbKeys: p ? (p.dbKeys ?? []) : undefined,
@@ -53,6 +61,13 @@ export async function runAgent(opts: RunAgentOpts): Promise<{ text: string }> {
   if (history.length) {
     prompt += 'BỐI CẢNH HỘI THOẠI TRƯỚC:\n' +
       history.map((m) => `${m.role === 'user' ? 'NGƯỜI DÙNG' : 'TRỢ LÝ'}: ${m.content}`).join('\n') + '\n\n';
+  }
+  // Copilot: file đang mở trong canvas → nhét ảnh chụp nội dung + chỉ dẫn dùng tool sửa trực tiếp.
+  const of = opts.openFile;
+  if (of?.kind === 'excel') {
+    prompt += 'BẢNG TÍNH ĐANG MỞ (địa chỉ ô = nội dung). Sửa/điền bằng tool **fill_cells** (ref kiểu "B2", value số/chuỗi, hoặc công thức "=SUM(A2:A5)"):\n' + (of.context || '(trống)') + '\n\n';
+  } else if (of?.kind === 'word' || of?.kind === 'html') {
+    prompt += 'TÀI LIỆU ĐANG MỞ (văn bản hiện tại). Chèn/sửa bằng tool **edit_doc** (ops: append | insert_after{anchorHeading} | replace{find}, mỗi op kèm html):\n' + (of.context || '(trống)') + '\n\n';
   }
   prompt += `CÂU HỎI HIỆN TẠI:\n${last?.content ?? ''}`;
 
@@ -182,5 +197,5 @@ export async function runAgent(opts: RunAgentOpts): Promise<{ text: string }> {
     });
   }
 
-  return { text: finalText };
+  return { text: finalText, outFiles };
 }

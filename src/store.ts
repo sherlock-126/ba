@@ -9,7 +9,8 @@ const CONV_FILE = resolve(DATA_DIR, 'conversations.json');
 const SESS_FILE = resolve(DATA_DIR, 'sessions.json');
 const AUDIT_FILE = resolve(DATA_DIR, 'audit.jsonl');
 
-export type Message = { role: 'user' | 'assistant'; content: string; ts: number; images?: string[]; files?: { name: string; type: string }[] };
+export type OutFileRec = { id: string; kind: string; filename: string; downloadUrl: string; viewUrl: string; shareUrl: string };
+export type Message = { role: 'user' | 'assistant'; content: string; ts: number; images?: string[]; files?: { name: string; type: string }[]; outFiles?: OutFileRec[] };
 export type Conversation = { id: string; owner: string; project?: string; title: string; createdAt: number; updatedAt: number; messages: Message[] };
 type SessionRec = { userId: string; createdAt: number };
 

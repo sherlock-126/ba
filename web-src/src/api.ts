@@ -2,7 +2,8 @@
 
 export type Project = { key: string; label: string; blurb: string };
 export type ConvMeta = { id: string; title: string; project?: string; createdAt: number; updatedAt: number };
-export type Message = { role: 'user' | 'assistant'; content: string; ts: number; images?: string[]; files?: { name: string; type: string }[] };
+export type OutFile = { id: string; kind: 'excel' | 'word' | 'pdf' | 'html'; filename: string; downloadUrl: string; viewUrl: string; shareUrl: string };
+export type Message = { role: 'user' | 'assistant'; content: string; ts: number; images?: string[]; files?: { name: string; type: string }[]; outFiles?: OutFile[] };
 export type Conversation = ConvMeta & { messages: Message[] };
 export type Me = { id: string; email: string; role: 'admin' | 'member'; mustChangePassword: boolean };
 export type AdminUser = { id: string; email: string; role: 'admin' | 'member'; active: boolean; mustChangePassword: boolean; createdAt: number; lastLoginAt: number | null };

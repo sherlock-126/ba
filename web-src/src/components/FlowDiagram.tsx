@@ -1,10 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import {
-  ReactFlow, Background, Controls, MarkerType, Position, Handle,
+  ReactFlow, Background, Controls, MarkerType, Position, Handle, getNodesBounds,
   BaseEdge, EdgeLabelRenderer, getSmoothStepPath, useInternalNode,
   useNodesState, useEdgesState, type Node, type Edge, type EdgeProps, type NodeProps,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
+import * as htmlToImage from 'html-to-image';
+
+export type FlowHandle = { exportBlob: () => Promise<Blob> };
 
 // D2 dùng để COMPILE (layout ELK) + RENDER (SVG cho loại đặc biệt). Lazy + serialize.
 let d2Promise: Promise<any> | null = null;
@@ -142,7 +145,7 @@ function padFor(shape: string): React.CSSProperties {
     case 'diamond': return { padding: '16% 20%' };
     case 'parallelogram': return { padding: '8% 18%' };
     case 'hexagon': return { padding: '10% 20%' };
-    case 'step': return { padding: '8% 20% 8% 14%' };
+    case 'step': return { padding: '8% 20%' };
     case 'cylinder': return { padding: '22% 10% 8%' };
     case 'queue': return { padding: '8% 18% 8% 8%' };
     case 'document': return { padding: '6% 8% 16%' };
@@ -175,12 +178,26 @@ function ShapeNode({ data }: NodeProps) {
   const stroke = custom ? '#94a3b8' : t.stroke; // fill tuỳ chỉnh → viền slate trung tính cho hợp
   const color = t.color;
   const isText = shape === 'text';
+  // Actor: icon người NHỎ, tỉ lệ cố định (không giãn theo node) + nhãn dưới → gọn đẹp.
+  if (shape === 'person') {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 3, width: '100%', height: '100%', boxSizing: 'border-box', padding: '7px 12px', background: fill, border: `1.5px solid ${stroke}`, borderRadius: 10 }}>
+        <Handle type="target" position={Position.Top} style={hs} />
+        <Handle type="source" position={Position.Bottom} style={hs} />
+        <svg width="20" height="23" viewBox="0 0 24 28" style={{ flex: 'none' }}>
+          <circle cx="12" cy="6" r="5" fill="none" stroke={stroke} strokeWidth="1.8" />
+          <path d="M2.5,27 C2.5,17 21.5,17 21.5,27" fill="none" stroke={stroke} strokeWidth="1.8" strokeLinejoin="round" />
+        </svg>
+        <div style={{ textAlign: 'center', fontSize: 13.5, fontWeight: 600, lineHeight: 1.2, color }}>{d.label}</div>
+      </div>
+    );
+  }
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
       {!isText && <ShapeSVG shape={shape} fill={fill} stroke={stroke} />}
       <Handle type="target" position={Position.Top} style={hs} />
       <Handle type="source" position={Position.Bottom} style={hs} />
-      <div style={{ ...center, position: 'absolute', inset: 0, boxSizing: 'border-box', ...padFor(shape), fontSize: 12.5, fontWeight: 600, fontStyle: isText ? 'italic' : 'normal', color }}>
+      <div style={{ ...center, position: 'absolute', inset: 0, boxSizing: 'border-box', ...padFor(shape), fontSize: 14, fontWeight: 600, fontStyle: isText ? 'italic' : 'normal', color }}>
         {d.label}
       </div>
     </div>
@@ -274,7 +291,8 @@ async function compileD2(code: string, withClasses = false) {
   // Chỉ chèn preamble KHI sơ đồ thực sự dùng class custom → flowchart thường giữ nguyên (0 rủi ro hồi quy).
   const needs = withClasses && new RegExp('class:\\s*(' + CUSTOM_CLASSES.join('|') + ')').test(code);
   const src = (needs ? CLASS_PREAMBLE + '\n' : '') + code.trim();
-  return d2.compile(src, { layout: 'elk' });
+  // dagre = layout mặc định D2, tối ưu flowchart phân lớp (trục dọc thẳng, nhánh gọn hơn elk).
+  return d2.compile(src, { layout: 'dagre' });
 }
 
 function buildGraph(diagram: any): { nodes: Node[]; edges: Edge[]; height: number } {
@@ -367,7 +385,25 @@ function PanZoom({ html }: { html: string }) {
   );
 }
 
-export function FlowDiagram({ code, full }: { code: string; full?: boolean }) {
+// SVG D2 native → PNG blob ở kích thước tự nhiên ×2 (crisp, crop sát).
+async function svgToBlob(svg: string): Promise<Blob> {
+  let w = 0, h = 0;
+  const wm = /\bwidth="([\d.]+)"/.exec(svg), hm = /\bheight="([\d.]+)"/.exec(svg);
+  if (wm) w = parseFloat(wm[1]); if (hm) h = parseFloat(hm[1]);
+  if (!w || !h) { const vb = /viewBox="([\d.\- ]+)"/.exec(svg); if (vb) { const p = vb[1].trim().split(/\s+/); if (p.length === 4) { w = +p[2]; h = +p[3]; } } }
+  if (!w || !h) { w = 1200; h = 800; }
+  const img = new Image();
+  await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(new Error('SVG load fail')); img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg); });
+  const scale = 2;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.ceil(w * scale); canvas.height = Math.ceil(h * scale);
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  return await new Promise<Blob>((res, rej) => canvas.toBlob((b) => (b ? res(b) : rej(new Error('toBlob fail'))), 'image/png'));
+}
+
+export const FlowDiagram = forwardRef<FlowHandle, { code: string; full?: boolean }>(function FlowDiagram({ code, full }, ref) {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [svg, setSvg] = useState<string>('');
@@ -375,7 +411,30 @@ export function FlowDiagram({ code, full }: { code: string; full?: boolean }) {
   const [loading, setLoading] = useState(true);
   const [natH, setNatH] = useState(300);
   const reqRef = useRef(0);
+  const wrapRef = useRef<HTMLDivElement>(null);
   const structured = STRUCTURED.test(code);
+
+  // Xuất ảnh PNG crop SÁT vùng sơ đồ, độ phân giải ×2 (gửi khách rõ nét).
+  async function exportBlob(): Promise<Blob> {
+    try { await (document as any).fonts?.ready; } catch { /* bỏ qua */ }
+    if (structured) {
+      if (!svg) throw new Error('Sơ đồ chưa vẽ xong, đợi chút');
+      return svgToBlob(svg);
+    }
+    if (!nodes.length) throw new Error('Sơ đồ chưa vẽ xong, đợi chút');
+    const vp = wrapRef.current?.querySelector('.react-flow__viewport') as HTMLElement | null;
+    if (!vp) throw new Error('Sơ đồ chưa sẵn sàng');
+    const b = getNodesBounds(nodes);
+    const PAD = 24;
+    const w = Math.ceil(b.width + PAD * 2), h = Math.ceil(b.height + PAD * 2);
+    const blob = await htmlToImage.toBlob(vp, {
+      backgroundColor: '#ffffff', pixelRatio: 2, width: w, height: h, cacheBust: true,
+      style: { width: w + 'px', height: h + 'px', transform: `translate(${-b.x + PAD}px,${-b.y + PAD}px) scale(1)`, transformOrigin: '0 0' },
+    });
+    if (!blob || !blob.size) throw new Error('Không tạo được ảnh');
+    return blob;
+  }
+  useImperativeHandle(ref, () => ({ exportBlob }), [structured, svg, nodes]);
 
   useEffect(() => {
     const my = ++reqRef.current;
@@ -414,7 +473,7 @@ export function FlowDiagram({ code, full }: { code: string; full?: boolean }) {
 
   const inlineH = Math.min(typeof window !== 'undefined' ? window.innerHeight * 0.6 : 520, Math.max(240, natH + 80));
   return (
-    <div className="bg-white" style={{ height: full ? '100%' : inlineH }}>
+    <div ref={wrapRef} className="bg-white" style={{ height: full ? '100%' : inlineH }}>
       {loading ? (
         <div className="p-4 text-xs text-muted">Đang vẽ sơ đồ…</div>
       ) : structured ? (
@@ -425,7 +484,7 @@ export function FlowDiagram({ code, full }: { code: string; full?: boolean }) {
           nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
           onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
           nodesConnectable={false} nodesDraggable elementsSelectable
-          fitView fitViewOptions={{ padding: 0.16 }} minZoom={0.1} maxZoom={3}
+          fitView fitViewOptions={{ padding: 0.08 }} minZoom={0.1} maxZoom={3}
           proOptions={{ hideAttribution: true }}
         >
           <Background color="#e3e8f1" gap={18} />
@@ -434,4 +493,4 @@ export function FlowDiagram({ code, full }: { code: string; full?: boolean }) {
       )}
     </div>
   );
-}
+});

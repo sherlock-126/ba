@@ -41,7 +41,7 @@ export function App() {
   async function openConv(id: string) {
     const c = await api.getConversation(id);
     if (c.project && c.project !== activeProject) setActiveProject(c.project); // mở hội thoại cũ → về đúng dự án của nó
-    const turns: ChatTurn[] = (c.messages || []).map((m) => ({ role: m.role, content: m.content, ts: m.ts, images: m.images, files: m.files }));
+    const turns: ChatTurn[] = (c.messages || []).map((m) => ({ role: m.role, content: m.content, ts: m.ts, images: m.images, files: m.files, outFiles: m.outFiles }));
     chat.seed(id, turns);
     setActiveId(id);
   }

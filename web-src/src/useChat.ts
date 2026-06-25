@@ -1,12 +1,14 @@
 import { useCallback, useRef, useState } from 'react';
 
 export type ToolEvent = { id?: string; name: string; input?: any; result?: string; error?: boolean };
+export type OutFile = { id: string; kind: 'excel' | 'word' | 'pdf' | 'html'; filename: string; downloadUrl: string; viewUrl: string; shareUrl: string };
 export type ChatTurn = {
   role: 'user' | 'assistant';
   content: string;
   images?: string[];
   files?: { name: string; type: string }[];
   tools?: ToolEvent[];
+  outFiles?: OutFile[];
   ask?: { question: string; options: string[] } | null;
   pending?: boolean;
   errored?: boolean;
@@ -53,6 +55,8 @@ export function useChat(onConversationStart?: (id: string) => void) {
         if (i >= 0) tools[i] = { ...tools[i], result: data.preview, error: data.error };
         return { ...x, tools };
       });
+    } else if (event === 'file_ready') {
+      p((x) => ({ ...x, outFiles: [...(x.outFiles || []), data as OutFile] }));
     } else if (event === 'ask_user') {
       p((x) => ({ ...x, ask: { question: data.question, options: data.options || [] } }));
     } else if (event === 'error') {

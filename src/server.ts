@@ -19,8 +19,9 @@ import {
 } from './users.js';
 import { runAgent, type ChatMsg } from './ai/agent.js';
 import { startAutoPull, refreshNow, getLastPull } from './repos.js';
+import { getById, getByToken, isInline, getRec, updateBytes, readHtml, writeHtml, type GenFile } from './generated-files.js';
 
-const app = Fastify({ logger: { level: 'info' } });
+const app = Fastify({ logger: { level: 'info' }, bodyLimit: 30 * 1024 * 1024 }); // 30MB cho base64 file/ảnh đính kèm + lưu file sửa
 
 // gắn user hiện tại vào request
 declare module 'fastify' { interface FastifyRequest { user?: User } }
@@ -171,6 +172,28 @@ app.post('/api/chat', async (req, reply) => {
   const userText: string = String(body.message ?? '').trim();
   let convId: string = String(body.conversationId ?? '');
   const owner = req.user!.id;
+
+  // ── COPILOT: sửa file ĐANG MỞ — chạy agent với context file, stream patch, KHÔNG lưu hội thoại ──
+  const openFile = body.openFile && typeof body.openFile === 'object'
+    ? { kind: String(body.openFile.kind || ''), context: String(body.openFile.context || '').slice(0, 12000) } : undefined;
+  if (openFile && userText) {
+    const actor = req.user!;
+    await audit(req, 'copilot_edit', openFile.kind, userText.slice(0, 200));
+    reply.hijack();
+    const raw = reply.raw;
+    raw.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+    const send = (type: string, data: unknown) => { try { raw.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`); } catch { /* gone */ } };
+    const abortController = new AbortController();
+    raw.on('close', () => abortController.abort());
+    let proj = projectByKey(String(body.project || '')) ?? projectByKey(DEFAULT_PROJECT);
+    if (proj?.adminOnly && actor.role !== 'admin') proj = projectByKey(DEFAULT_PROJECT);
+    try {
+      await runAgent({ messages: [{ role: 'user', content: userText }], abortController, emit: send, openFile, userId: actor.id, isAdmin: actor.role === 'admin', project: proj,
+        onAudit: (action, target, detail) => appendAudit({ ts: Date.now(), actorId: actor.id, actorEmail: actor.email, action, target, detail }) });
+      send('done', {});
+    } catch (e: any) { send('error', { message: String(e?.message ?? e) }); } finally { raw.end(); }
+    return;
+  }
   // Ảnh đính kèm (data URL), tối đa 4, mỗi ảnh ≤ 8MB.
   const images: string[] = (Array.isArray(body.images) ? body.images : [])
     .filter((s: any) => typeof s === 'string' && s.startsWith('data:image/') && s.length < 8_000_000).slice(0, 4);
@@ -208,12 +231,14 @@ app.post('/api/chat', async (req, reply) => {
   const history: ChatMsg[] = (conv.messages ?? []).map((m) => ({ role: m.role, content: m.content }));
   const actor = req.user!;
   try {
-    const { text } = await runAgent({
+    const { text, outFiles } = await runAgent({
       messages: history, abortController, emit: send, images, files, project,
+      userId: actor.id,
       isAdmin: actor.role === 'admin',
       onAudit: (action, target, detail) => { appendAudit({ ts: Date.now(), actorId: actor.id, actorEmail: actor.email, action, target, detail }); },
     });
-    if (text) await appendMessage(convId, { role: 'assistant', content: text, ts: Date.now() });
+    // Lưu cả khi chỉ tạo file (không có text) để mở lại vẫn còn thẻ file.
+    if (text || outFiles.length) await appendMessage(convId, { role: 'assistant', content: text, ts: Date.now(), outFiles: outFiles.length ? outFiles : undefined });
     send('done', { conversationId: convId });
   } catch (e: any) { send('error', { message: String(e?.message ?? e) }); } finally { raw.end(); }
 });
@@ -249,6 +274,55 @@ app.register(httpProxy, {
       return clean;
     },
   },
+});
+
+// ── File AI sinh ra: tải về (riêng tư, /api/* → cần đăng nhập) + link công khai (/f/:token) ──
+function sendFile(reply: any, rec: GenFile, bytes: Buffer) {
+  reply.header('Content-Type', rec.mime);
+  reply.header('Content-Disposition', `${isInline(rec.kind) ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(rec.filename)}`);
+  reply.header('Cache-Control', 'private, max-age=0');
+  reply.header('X-Content-Type-Options', 'nosniff');
+  // HTML serve cùng origin → sandbox để chặn <script>/XSS (báo cáo không cần JS). PDF/Excel/Word là binary nên an toàn.
+  if (rec.kind === 'html') reply.header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; sandbox");
+  return reply.send(bytes);
+}
+app.get('/api/files/:id', async (req: any, reply) => {
+  const f = await getById(String(req.params.id), req.user!.id);
+  if (!f) return reply.code(404).send({ error: 'File không tồn tại hoặc đã hết hạn' });
+  await audit(req, 'download_file', f.rec.id, f.rec.filename);
+  return sendFile(reply, f.rec, f.bytes);
+});
+// Public: hook auth chỉ chặn /api/* nên /f/* đi thẳng. Token ngẫu nhiên + hết hạn 30 ngày.
+app.get('/f/:token', async (req: any, reply) => {
+  const f = await getByToken(String(req.params.token));
+  if (!f) return reply.code(404).type('text/html; charset=utf-8').send('<!doctype html><meta charset=utf-8><body style="font-family:sans-serif;text-align:center;padding:60px;color:#475569"><h2>Link không tồn tại hoặc đã hết hạn</h2></body>');
+  return sendFile(reply, f.rec, f.bytes);
+});
+// ── Preview/Edit (chủ sở hữu) ──
+app.get('/api/files/:id/raw', async (req: any, reply) => {
+  const f = await getById(String(req.params.id), req.user!.id);
+  if (!f) return reply.code(404).send({ error: 'không tìm thấy' });
+  return sendFile(reply, f.rec, f.bytes);
+});
+app.put('/api/files/:id/raw', async (req: any, reply) => {
+  const data = String((req.body || {}).data || '');
+  if (!data) return reply.code(400).send({ error: 'thiếu data (base64)' });
+  const ok = await updateBytes(String(req.params.id), req.user!.id, Buffer.from(data, 'base64'));
+  if (!ok) return reply.code(404).send({ error: 'không tìm thấy' });
+  await audit(req, 'edit_file', String(req.params.id));
+  return { ok: true };
+});
+app.get('/api/files/:id/html', async (req: any, reply) => {
+  const html = await readHtml(String(req.params.id), req.user!.id);
+  if (html == null) return reply.code(404).send({ error: 'không hỗ trợ / không tìm thấy' });
+  return { html };
+});
+app.put('/api/files/:id/html', async (req: any, reply) => {
+  const html = String((req.body || {}).html ?? '');
+  const r = await writeHtml(String(req.params.id), req.user!.id, html);
+  if (!r) return reply.code(404).send({ error: 'không hỗ trợ / không tìm thấy' });
+  await audit(req, 'edit_file', String(req.params.id));
+  return r;
 });
 
 // ── Static web ──────────────────────────────────────────────────

@@ -4,6 +4,7 @@ import type { Project } from '../api';
 import { Message } from './Message';
 import { Composer } from './Composer';
 import { Empty } from './Empty';
+import { DiagramSelectionProvider, DiagramExportBar } from './diagramExport';
 
 export function ChatPanel({ messages, busy, onSend, onCancel, project }: {
   messages: ChatTurn[];
@@ -38,6 +39,7 @@ export function ChatPanel({ messages, busy, onSend, onCancel, project }: {
   const onComposerFocus = () => setTimeout(() => scrollToBottom(true), 300);
 
   return (
+    <DiagramSelectionProvider>
     <div className="relative flex min-w-0 flex-1 flex-col">
       <div ref={scrollRef} onScroll={onScroll} className="flex-1 overflow-auto overscroll-contain">
         {messages.length === 0 ? (
@@ -54,7 +56,9 @@ export function ChatPanel({ messages, busy, onSend, onCancel, project }: {
           className="absolute bottom-24 left-1/2 -translate-x-1/2 rounded-full border border-line bg-surface px-3 py-1 text-xs text-muted shadow-cardhover hover:text-brand-dark"
         >↓ Mới nhất</button>
       )}
+      <DiagramExportBar />
       <Composer busy={busy} onSend={onSend} onCancel={onCancel} onFocus={onComposerFocus} />
     </div>
+    </DiagramSelectionProvider>
   );
 }

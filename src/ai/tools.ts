@@ -14,6 +14,8 @@ import { wsRequest, type WsKey } from '../workspaces.js';
 import { runReadOnlyQuery, listTables, describeTable, dbAvailable, dbKeys } from '../db.js';
 import { fetchLogs, serverStatus, listServers, serverKeys, serverByKey } from '../servers.js';
 import { buildDocPayload, blockNoteToText, slugify } from '../docs.js';
+import { buildExcel, buildWord, buildPdf, htmlShell } from './docgen.js';
+import { saveGenerated } from '../generated-files.js';
 
 // ripgrep binary tuyệt đối (không dựa vào `rg` trên PATH — môi trường này rg chỉ là shell function).
 const RG = rgPath;
@@ -51,6 +53,9 @@ function run(cmd: string, args: string[], cwd: string, timeoutMs = 15000): Promi
 
 export type ToolCtx = {
   emit: (type: string, data: unknown) => void;
+  userId?: string;                                         // chủ sở hữu file sinh ra (cho /api/files/:id)
+  sheetOpen?: boolean;                                     // copilot: đang mở Excel → bật tool fill_cells
+  docOpen?: boolean;                                       // copilot: đang mở Word/HTML → bật tool edit_doc
   isAdmin?: boolean;                                       // admin → bật tool DB/log server + repo/workspace adminOnly
   onAudit?: (action: string, target?: string, detail?: string) => void;
   // Scope theo DỰ ÁN: nếu có, chỉ cho phép đúng các key này (chồng lên admin-gating).
@@ -379,6 +384,73 @@ export function createCodeMcp(ctx: ToolCtx) {
           return asText(await fetchLogs({ server, source, lines, since, grep }));
         }),
     );
+  }
+
+  // ── TẠO FILE để tải về / chia sẻ public (Excel / Word / PDF / HTML) ──
+  const owner = ctx.userId || 'anon';
+  const onSaved = async (kind: any, filename: string, buf: Buffer) => {
+    const f = await saveGenerated(owner, kind, filename, buf);
+    ctx.emit('file_ready', { id: f.id, kind: f.kind, filename: f.filename, downloadUrl: f.downloadUrl, viewUrl: f.viewUrl, shareUrl: f.shareUrl });
+    ctx.onAudit?.('make_' + kind, f.id, f.filename);
+    return asText({ ok: true, kind: f.kind, filename: f.filename, downloadUrl: f.downloadUrl, shareUrl: f.shareUrl, note: 'Đã tạo file. Người dùng bấm Tải/Mở/Copy link trên thẻ file. KHÔNG dán lại nội dung file ra chat.' });
+  };
+  tools.push(
+    tool('make_excel', 'Tạo file Excel (.xlsx) để tải về / chia sẻ. Dùng khi user cần xuất bảng/danh sách/số liệu.', {
+      title: z.string().describe('tên file (không cần đuôi)'),
+      sheets: z.array(z.object({
+        name: z.string().optional().describe('tên sheet'),
+        headers: z.array(z.string()).describe('hàng tiêu đề cột'),
+        rows: z.array(z.array(z.union([z.string(), z.number(), z.null()]))).describe('các dòng, mỗi dòng = mảng ô theo thứ tự headers'),
+      })).min(1).describe('1 hoặc nhiều sheet'),
+    }, async ({ title, sheets }) => {
+      try { return await onSaved('excel', title, buildExcel(sheets as any)); }
+      catch (e: any) { return asText({ ok: false, error: String(e?.message ?? e) }); }
+    }),
+    tool('make_word', 'Tạo file Word (.docx) báo cáo có heading/đoạn/bảng.', {
+      title: z.string(),
+      sections: z.array(z.union([
+        z.object({ type: z.literal('heading'), text: z.string(), level: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional() }),
+        z.object({ type: z.literal('paragraph'), text: z.string(), bold: z.boolean().optional(), align: z.enum(['left', 'center', 'right']).optional() }),
+        z.object({ type: z.literal('table'), headers: z.array(z.string()), rows: z.array(z.array(z.union([z.string(), z.number()]))) }),
+      ])).describe('các khối nội dung theo thứ tự'),
+    }, async ({ title, sections }) => {
+      try { return await onSaved('word', title, await buildWord(title, sections as any)); }
+      catch (e: any) { return asText({ ok: false, error: String(e?.message ?? e) }); }
+    }),
+    tool('make_pdf', 'Tạo file PDF báo cáo từ HTML (bạn tự viết body HTML — chỉ thẻ <h1..h3>,<p>,<table>,<ul>,<b>,<div> + class; KHÔNG ảnh/URL ngoài). Hệ thống tự bọc font + CSS in ấn.', {
+      title: z.string(),
+      body_html: z.string().describe('phần thân HTML (không cần <html>/<head>)'),
+    }, async ({ title, body_html }) => {
+      try { return await onSaved('pdf', title, await buildPdf(title, body_html)); }
+      catch (e: any) { return asText({ ok: false, error: String(e?.message ?? e) }); }
+    }),
+    tool('make_html', 'Tạo trang HTML (xem/chia sẻ trực tiếp trên trình duyệt). Body HTML như make_pdf.', {
+      title: z.string(),
+      body_html: z.string().describe('phần thân HTML'),
+    }, async ({ title, body_html }) => {
+      try { return await onSaved('html', title, Buffer.from(htmlShell(title, body_html), 'utf8')); }
+      catch (e: any) { return asText({ ok: false, error: String(e?.message ?? e) }); }
+    }),
+  );
+
+  // ── COPILOT: sửa file ĐANG MỞ trong canvas (patch về frontend qua SSE) ──
+  if (ctx.sheetOpen) {
+    tools.push(tool('fill_cells', 'Điền/sửa các ô của BẢNG TÍNH người dùng ĐANG MỞ. ref = địa chỉ kiểu Excel ("B2"); value = số/chuỗi HOẶC công thức bắt đầu bằng "=" (vd "=SUM(B2:B5)").', {
+      cells: z.array(z.object({ ref: z.string(), value: z.union([z.string(), z.number()]), sheet: z.string().optional() })).min(1),
+    }, async ({ cells }) => {
+      ctx.emit('cells_patch', { cells });
+      ctx.onAudit?.('fill_cells', undefined, `${cells.length} ô`);
+      return asText({ ok: true, filled: cells.length, note: 'Đã điền vào bảng tính đang mở. Nhắc người dùng bấm 💾 Lưu để ghi vào file.' });
+    }));
+  }
+  if (ctx.docOpen) {
+    tools.push(tool('edit_doc', 'Chèn/sửa nội dung TÀI LIỆU ĐANG MỞ. ops = mảng thao tác: {action:"append",html} | {action:"insert_after",anchorHeading,html} | {action:"replace",find,html}. html = đoạn HTML (vd "<h2>..</h2><p>..</p>").', {
+      ops: z.array(z.object({ action: z.enum(['append', 'insert_after', 'replace']), find: z.string().optional(), anchorHeading: z.string().optional(), html: z.string() })).min(1),
+    }, async ({ ops }) => {
+      ctx.emit('doc_patch', { ops });
+      ctx.onAudit?.('edit_doc', undefined, `${ops.length} thao tác`);
+      return asText({ ok: true, applied: ops.length, note: 'Đã cập nhật tài liệu đang mở. Nhắc người dùng bấm 💾 Lưu để ghi vào file.' });
+    }));
   }
 
   const server = createSdkMcpServer({ name: 'code', version: '1.0.0', tools });
