@@ -9,10 +9,12 @@ import { z } from 'zod';
 import { spawn } from 'node:child_process';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
+import { lookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
 import { config, type RepoCfg } from '../config.js';
 import { wsRequest, type WsKey } from '../workspaces.js';
 import { runReadOnlyQuery, listTables, describeTable, dbAvailable, dbKeys } from '../db.js';
-import { fetchLogs, serverStatus, listServers, serverKeys, serverByKey } from '../servers.js';
+import { fetchLogs, serverStatus, listServers, serverKeys, serverByKey, readServerEnv, apiCall } from '../servers.js';
 import { buildDocPayload, blockNoteToText, slugify } from '../docs.js';
 import { buildExcel, buildWord, buildPdf, htmlShell } from './docgen.js';
 import { saveGenerated } from '../generated-files.js';
@@ -27,6 +29,71 @@ function asText(obj: unknown) {
   let s = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 0);
   if (s.length > MAX_PAYLOAD) s = s.slice(0, MAX_PAYLOAD) + '\n…(đã cắt bớt — đọc tiếp bằng offset/limit hoặc thu hẹp truy vấn)';
   return { content: [{ type: 'text' as const, text: s }] };
+}
+
+// ── fetch_url: đọc URL công khai (GET) — guard SSRF chặn nội bộ/metadata ──
+function isPrivateIp(ipRaw: string): boolean {
+  const ip = ipRaw.replace(/^\[|\]$/g, '').split('%')[0];
+  const v4 = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(ip);
+  if (v4) return isPrivateIp(v4[1]);
+  if (ip === '::1' || ip === '::' || /^(127\.|0\.|10\.|192\.168\.|169\.254\.)/.test(ip)) return true;
+  const m = /^172\.(\d+)\./.exec(ip); if (m && +m[1] >= 16 && +m[1] <= 31) return true;
+  if (/^(fc|fd|fe80:)/i.test(ip)) return true; // IPv6 ULA / link-local
+  return false;
+}
+async function assertPublicUrl(raw: string): Promise<URL> {
+  let u: URL;
+  try { u = new URL(raw); } catch { throw new Error('URL không hợp lệ'); }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('Chỉ hỗ trợ http/https');
+  const host = u.hostname.toLowerCase();
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.internal') || host.endsWith('.local')) throw new Error('Chặn host nội bộ');
+  if (isIP(host)) { if (isPrivateIp(host)) throw new Error('Chặn IP nội bộ/riêng tư'); return u; }
+  let addrs;
+  try { addrs = await lookup(host, { all: true }); } catch { throw new Error('Không phân giải được tên miền'); }
+  if (!addrs.length || addrs.some((a) => isPrivateIp(a.address))) throw new Error('Tên miền trỏ tới địa chỉ nội bộ — bị chặn');
+  return u;
+}
+function htmlToText(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<\/(p|div|h[1-6]|li|tr|br|section|article|head)\s*>/gi, '\n').replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+}
+async function readCapped(res: Response, cap: number): Promise<string> {
+  if (Number(res.headers.get('content-length') || 0) > cap) throw new Error('Nội dung quá lớn (>8MB)');
+  const reader = res.body?.getReader();
+  if (!reader) return (await res.text()).slice(0, cap * 2);
+  const chunks: Uint8Array[] = []; let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read(); if (done) break;
+    if (value) { total += value.length; if (total > cap) { await reader.cancel().catch(() => {}); throw new Error('Nội dung quá lớn (>8MB)'); } chunks.push(value); }
+  }
+  const out = new Uint8Array(total); let o = 0; for (const c of chunks) { out.set(c, o); o += c.length; }
+  return new TextDecoder('utf-8').decode(out);
+}
+async function safeFetch(raw: string): Promise<{ status: number; contentType: string; body: string }> {
+  let url = raw;
+  for (let hop = 0; hop < 4; hop++) {
+    const u = await assertPublicUrl(url);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15000);
+    let res: Response;
+    try {
+      res = await fetch(u.toString(), { method: 'GET', redirect: 'manual', signal: ctrl.signal,
+        // UA trình duyệt (nhiều WAF chặn UA "bot" → trả 500), kèm Accept rõ.
+        headers: { 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36', Accept: 'application/json, text/html, text/*, */*', 'Accept-Language': 'en-US,en;q=0.9' } });
+    } finally { clearTimeout(timer); }
+    const loc = res.headers.get('location');
+    if (res.status >= 300 && res.status < 400 && loc) { url = new URL(loc, u).toString(); continue; } // re-validate hop kế
+    const ct = (res.headers.get('content-type') || '').toLowerCase();
+    let body = await readCapped(res, 8 * 1024 * 1024);
+    if (/json/.test(ct) || /\.json(\?|$)/i.test(u.pathname)) { try { body = JSON.stringify(JSON.parse(body), null, 2); } catch { /* giữ nguyên */ } }
+    else if (/html/.test(ct) || /^\s*(<!doctype html|<html)/i.test(body)) body = htmlToText(body);
+    return { status: res.status, contentType: ct, body };
+  }
+  throw new Error('Quá nhiều chuyển hướng (redirect)');
 }
 
 /** Giải đường dẫn an toàn: bắt buộc nằm trong repo.path. Trả về absolute hoặc null nếu vi phạm. */
@@ -383,8 +450,67 @@ export function createCodeMcp(ctx: ToolCtx) {
           ctx.onAudit?.('server_logs', server, `${source} lines=${lines ?? 200}${since ? ' since=' + since : ''}${grep ? ' grep=' + grep : ''}`);
           return asText(await fetchLogs({ server, source, lines, since, grep }));
         }),
+      tool('server_env',
+        'Đọc CẤU HÌNH/biến môi trường của ứng dụng trên server (chỉ đọc) để biết base URL đối tác + TÊN biến chứa secret. ' +
+        srvDesc + ' container = tên container docker (mặc định app); xem server_list. ' +
+        'LƯU Ý: giá trị secret bị CHE (hiện "<đã set, N ký tự>") — bạn KHÔNG thấy token thật và không cần thấy; ' +
+        'để gọi API hãy truyền TÊN biến cho call_api (auth.env). Các biến không phải secret (BASE_URL/ID/HOST) hiện đầy đủ.',
+        { server: z.string(), container: z.string().optional().describe('tên container (mặc định app)') },
+        async ({ server, container }) => {
+          if (!srvOk(server)) return asText({ ok: false, error: `server "${server}" không thuộc dự án này. Có: ${scopedServers.join(', ')}` });
+          ctx.onAudit?.('server_env', server, container);
+          return asText(await readServerEnv(server, container));
+        }),
+      tool('call_api',
+        'Gọi API THẬT của đối tác/nội bộ từ trong server để CHECK/THAO TÁC dữ liệu (curl chạy ngay trong container — có env + network). ' +
+        srvDesc + ' Auth: truyền auth={name:"Authorization",scheme:"Bearer",env:"TÊN_BIẾN"} — secret được lấy NGAY trên server từ biến môi trường (bạn không cần biết giá trị). ' +
+        'Lấy base URL + tên biến auth từ server_env, lấy endpoint từ fetch_url (API docs). ' +
+        'ĐỌC dữ liệu → method GET (an toàn, gọi thoải mái). ' +
+        'GHI dữ liệu (POST/PUT/PATCH/DELETE thay đổi dữ liệu thật) → BẮT BUỘC tóm tắt rõ sẽ gọi gì (method + url + body) và XIN NGƯỜI DÙNG XÁC NHẬN trước, chỉ gọi sau khi họ đồng ý.',
+        {
+          server: z.string(),
+          method: z.enum(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE']).describe('GET để đọc; POST/PUT/PATCH/DELETE để ghi (phải xác nhận user trước)'),
+          url: z.string().describe('URL đầy đủ http/https (lấy base từ server_env)'),
+          container: z.string().optional().describe('container chạy curl (mặc định app)'),
+          query: z.record(z.string(), z.string()).optional().describe('query params, được encode an toàn'),
+          headers: z.record(z.string(), z.string()).optional().describe('header phụ (KHÔNG để secret ở đây — dùng auth)'),
+          auth: z.object({
+            name: z.string().describe('tên header, vd "Authorization" hoặc "X-Api-Key"'),
+            scheme: z.string().optional().describe('vd "Bearer" (để trống nếu không có)'),
+            env: z.string().describe('TÊN biến môi trường chứa secret (vd "VNFAI_API_KEY") — resolve trên server'),
+          }).optional().describe('cô lập secret: token lấy từ env trên server, không vào chat'),
+          body: z.string().optional().describe('thân request (JSON string) cho POST/PUT/PATCH'),
+        },
+        async ({ server, method, url, container, query, headers, auth, body }) => {
+          if (!srvOk(server)) return asText({ ok: false, error: `server "${server}" không thuộc dự án này. Có: ${scopedServers.join(', ')}` });
+          ctx.onAudit?.('call_api', server, `${method} ${url}`); // KHÔNG log body/secret
+          return asText(await apiCall({ server, method, url, container, query, headers, auth, body }));
+        }),
     );
   }
+
+  // ── ĐỌC URL / API DOCS (GET, công khai, SSRF-guarded) ──
+  tools.push(tool('fetch_url',
+    'Tải nội dung 1 URL CÔNG KHAI (chỉ GET, chỉ đọc) — API docs / OpenAPI spec / trang web — để tra cứu khi viết spec tích hợp. ' +
+    'Trang ReDoc/Swagger là vỏ JS gần như RỖNG → hãy fetch chính file spec (vd .../swagger/v1/swagger.json, /openapi.json, /v3/api-docs). Spec lớn → dùng grep tìm endpoint/tag rồi đọc từng phần bằng offset/limit.',
+    {
+      url: z.string().describe('URL http/https công khai'),
+      grep: z.string().optional().describe('chỉ giữ các DÒNG chứa chuỗi này (lọc spec lớn)'),
+      offset: z.number().int().min(0).optional().describe('dòng bắt đầu (mặc định 0)'),
+      limit: z.number().int().min(1).max(2000).optional().describe('số dòng trả về (mặc định 400)'),
+    },
+    async ({ url, grep, offset, limit }) => {
+      try {
+        const r = await safeFetch(url);
+        let lines = r.body.split('\n');
+        const total = lines.length;
+        if (grep) { const g = grep.toLowerCase(); lines = lines.filter((l) => l.toLowerCase().includes(g)); }
+        const off = offset || 0; const shown = lines.slice(off, off + (limit || 400));
+        ctx.onAudit?.('fetch_url', url);
+        return asText({ status: r.status, contentType: r.contentType, totalLines: total,
+          matchedLines: grep ? lines.length : undefined, shown: `${off}..${off + shown.length}`, body: shown.join('\n') });
+      } catch (e: any) { return asText({ ok: false, error: String(e?.message ?? e) }); }
+    }));
 
   // ── TẠO FILE để tải về / chia sẻ public (Excel / Word / PDF / HTML) ──
   const owner = ctx.userId || 'anon';

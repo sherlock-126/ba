@@ -136,6 +136,123 @@ export async function serverStatus(serverKey: string): Promise<LogResult> {
   return { ok: true, server: srv.key, source: 'status', lines: 0, truncated: r.truncated, elapsedMs: r.elapsedMs, output: r.stdout.trimEnd() };
 }
 
+// ── ĐỌC ENV + GỌI API thật trên server (admin) ─────────────────────────────
+// Secret được CÔ LẬP: server_env che giá trị; call_api resolve secret NGAY trong
+// container (qua ${ENV}) — token KHÔNG bao giờ rời server / không vào LLM.
+
+const SECRET_KEY_RE = /KEY|SECRET|PASSWORD|TOKEN|HASH|PRIVATE|CREDENTIAL|PWD|AUTH/i;
+const METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE']);
+const ENV_NAME_RE = /^[A-Z0-9_]+$/;
+const HDR_NAME_RE = /^[A-Za-z0-9-]+$/;
+const SCHEME_RE = /^[A-Za-z0-9-]*$/;
+const QKEY_RE = /^[A-Za-z0-9_.\-[\]]+$/;
+
+/** Các container docker duyệt sẵn của 1 server (từ registry — không từ AI). */
+function dockerRefs(srv: ServerCfg): string[] {
+  return srv.sources.filter((s) => s.kind === 'docker').map((s) => s.ref);
+}
+
+export type EnvResult =
+  | { ok: true; server: string; container: string; count: number; env: Record<string, string> }
+  | { ok: false; error: string };
+
+/** Đọc biến môi trường của 1 container (printenv) — giá trị secret bị CHE. */
+export async function readServerEnv(server: string, container?: string): Promise<EnvResult> {
+  const srv = serverByKey(server);
+  if (!srv) return { ok: false, error: `server "${server}" không tồn tại. Có: ${serverKeys().join(', ')}` };
+  const refs = dockerRefs(srv);
+  if (!refs.length) return { ok: false, error: `server "${server}" không có container docker để đọc env.` };
+  const c = container ?? refs[0];
+  if (!refs.includes(c)) return { ok: false, error: `container "${c}" không thuộc server ${server}. Có: ${refs.join(', ')}` };
+
+  const r = await runRemote(srv, `docker exec ${shQuote(c)} printenv`);
+  if (!r.stdout.trim()) return { ok: false, error: `đọc env thất bại (mã ${r.code}).` };
+  const env: Record<string, string> = {};
+  for (const line of r.stdout.split('\n')) {
+    const i = line.indexOf('=');
+    if (i <= 0) continue;
+    const k = line.slice(0, i);
+    const v = line.slice(i + 1);
+    env[k] = SECRET_KEY_RE.test(k) ? `<đã set, ${v.length} ký tự>` : v;
+  }
+  return { ok: true, server: srv.key, container: c, count: Object.keys(env).length, env };
+}
+
+export type ApiAuth = { name: string; scheme?: string; env: string };
+export type ApiCallOpts = {
+  server: string; method: string; url: string; container?: string;
+  query?: Record<string, string>; headers?: Record<string, string>; auth?: ApiAuth; body?: string;
+};
+export type ApiResult =
+  | { ok: true; server: string; container: string; method: string; httpStatus: number | null; truncated: boolean; elapsedMs: number; body: string }
+  | { ok: false; error: string };
+
+/**
+ * Gọi API thật — chạy `curl` NGAY trong container (có env + network đối tác).
+ * Secret cô lập: auth dựng header `-H "<name>: <scheme> ${ENV}"` (double-quote → CONTAINER sh
+ * expand ${ENV} từ env; agent chỉ truyền TÊN biến). Mọi tham số khác shQuote (single-quote) →
+ * không injection. Chỉ chạy curl dựng từ mảng tham số, không lệnh tuỳ ý.
+ */
+export async function apiCall(o: ApiCallOpts): Promise<ApiResult> {
+  const srv = serverByKey(o.server);
+  if (!srv) return { ok: false, error: `server "${o.server}" không tồn tại. Có: ${serverKeys().join(', ')}` };
+  const refs = dockerRefs(srv);
+  if (!refs.length) return { ok: false, error: `server "${o.server}" không có container để gọi API.` };
+  const c = o.container ?? refs[0];
+  if (!refs.includes(c)) return { ok: false, error: `container "${c}" không thuộc server ${o.server}. Có: ${refs.join(', ')}` };
+
+  const method = String(o.method || 'GET').toUpperCase();
+  if (!METHODS.has(method)) return { ok: false, error: `method "${method}" không hợp lệ. Cho phép: ${[...METHODS].join(', ')}` };
+
+  const url = String(o.url || '');
+  if (!/^https?:\/\//i.test(url)) return { ok: false, error: 'url phải bắt đầu bằng http:// hoặc https://' };
+  // Chặn khoảng trắng, ký tự điều khiển và metachar shell trong URL (defense-in-depth; shQuote đã cô lập).
+  if (/\s/.test(url) || /[\x00-\x1f]/.test(url) || /[`"'<>\\^{}|$();]/.test(url)) {
+    return { ok: false, error: 'url chứa ký tự không hợp lệ (khoảng trắng / ký tự điều khiển / ký tự shell).' };
+  }
+
+  // query string (encode an toàn)
+  let qs = '';
+  if (o.query && Object.keys(o.query).length) {
+    const parts: string[] = [];
+    for (const [k, v] of Object.entries(o.query)) {
+      if (!QKEY_RE.test(k)) return { ok: false, error: `tên query param không hợp lệ: ${k}` };
+      parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`);
+    }
+    qs = (url.includes('?') ? '&' : '?') + parts.join('&');
+  }
+
+  // Dựng curl bằng MẢNG tham số (mỗi phần shQuote) — container sh chạy y nguyên, không injection.
+  const a: string[] = ['curl', '-sS', '-m', '30', '-w', shQuote('\\n<<<HTTP:%{http_code}>>>'), '-X', method, shQuote(url + qs)];
+
+  for (const [k, v] of Object.entries(o.headers || {})) {
+    if (!HDR_NAME_RE.test(k)) return { ok: false, error: `tên header không hợp lệ: ${k}` };
+    a.push('-H', shQuote(`${k}: ${String(v).replace(/[\r\n]/g, '')}`));
+  }
+
+  if (o.auth) {
+    if (!HDR_NAME_RE.test(o.auth.name)) return { ok: false, error: 'auth.name không hợp lệ.' };
+    const scheme = o.auth.scheme ?? '';
+    if (!SCHEME_RE.test(scheme)) return { ok: false, error: 'auth.scheme không hợp lệ.' };
+    if (!ENV_NAME_RE.test(o.auth.env)) return { ok: false, error: 'auth.env không hợp lệ (chỉ A-Z 0-9 _).' };
+    // DOUBLE-quote để container sh expand ${ENV}; name/scheme/env đã validate → an toàn.
+    a.push('-H', `"${o.auth.name}: ${scheme ? scheme + ' ' : ''}\${${o.auth.env}}"`);
+  }
+
+  if (o.body != null && o.body !== '' && method !== 'GET' && method !== 'HEAD') {
+    a.push('--data', shQuote(String(o.body)));
+  }
+
+  const remoteCmd = `docker exec ${shQuote(c)} sh -c ${shQuote(a.join(' '))}`;
+  const r = await runRemote(srv, remoteCmd);
+
+  let body = r.stdout;
+  let httpStatus: number | null = null;
+  const m = /<<<HTTP:(\d+)>>>\s*$/.exec(body);
+  if (m) { httpStatus = Number(m[1]); body = body.slice(0, m.index); }
+  return { ok: true, server: srv.key, container: c, method, httpStatus, truncated: r.truncated, elapsedMs: r.elapsedMs, body: body.trimEnd() || '(rỗng)' };
+}
+
 /** Liệt kê server + nguồn log (không kèm secret) cho tool/endpoint. */
 export function listServers() {
   return config.servers.map((s) => ({

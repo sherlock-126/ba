@@ -24,6 +24,7 @@ clone_one marketing "$MARKETING_BRANCH" "$MKT_SRC"
 # Hệ thống bổ sung (chỉ admin dùng).
 clone_one dhco "${DHCO_BRANCH:-main}" "${DHCO_SRC:-/root/.vibedev/repos/dhco}"
 clone_one thghub "${THGHUB_BRANCH:-main}" "${THGHUB_SRC:-/root/.vibedev/repos/thghub}"
+clone_one ecount-integration "${ECOUNT_BRANCH:-main}" "${ECOUNT_SRC:-/root/.vibedev/repos/ecount-integration}"
 # Side projects (nhóm "labs") — chỉ admin, hỏi-đáp code.
 clone_one video_ai "${VIDEO_AI_BRANCH:-main}" "/root/.vibedev/repos/video_ai"
 clone_one adg_database "${ADG_BRANCH:-main}" "/root/.vibedev/repos/adg_database"

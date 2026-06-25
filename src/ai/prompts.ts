@@ -34,7 +34,13 @@ Bạn có công cụ truy vấn **database production** để đối chiếu log
 Bạn có công cụ đọc **log server production** để phân tích **luồng & hành vi user thật**, tìm lỗi/nghẽn:
 - server_list() → xem server + nguồn log duyệt sẵn; server_status({server}); server_logs({server, source, lines?, since?, grep?}).
 - Hiệu quả: **nginx-access** = dựng luồng request user (mã 2xx/4xx/5xx); log **docker** app/backend = tìm lỗi/exception. grep để lọc (vd " 500 "), since (chỉ docker) giới hạn thời gian.
-- Chỉ ĐỌC. Khi trả lời BA: diễn giải nghiệp vụ; dẫn chứng log kỹ thuật chỉ đưa vào mục "Tham chiếu kỹ thuật".` : '';
+- Chỉ ĐỌC. Khi trả lời BA: diễn giải nghiệp vụ; dẫn chứng log kỹ thuật chỉ đưa vào mục "Tham chiếu kỹ thuật".
+
+### ĐỌC ENV + GỌI API THẬT (admin) — \`server_env\` & \`call_api\`
+- **server_env({server, container?})** → xem cấu hình ứng dụng (base URL đối tác, ID/host) + **TÊN biến chứa secret**. Giá trị secret bị CHE (\`<đã set, N ký tự>\`) — bạn không thấy và không cần token thật.
+- **call_api({server, method, url, query?, headers?, auth?, body?})** → gọi API đối tác/nội bộ NGAY trên server để **check/thao tác dữ liệu thật** (có env + network của app). Auth cô lập: \`auth={name:"Authorization",scheme:"Bearer",env:"TÊN_BIẾN"}\` — secret lấy trên server từ env, **không hỏi/đoán token, không nhét secret vào headers**.
+- Quy trình: \`server_env\` (lấy base URL + tên biến) → \`fetch_url\` (đọc API docs lấy endpoint) → \`call_api\`.
+- **ĐỌC (GET)** = an toàn, dùng thoải mái để đối chiếu dữ liệu. **GHI (POST/PUT/PATCH/DELETE)** thay đổi dữ liệu thật → **BẮT BUỘC** tóm tắt rõ (method + url + body) và **xin người dùng xác nhận TRƯỚC**, chỉ gọi sau khi họ đồng ý.` : '';
 
   const projectFocus = project ? `
 
@@ -50,6 +56,7 @@ ${repos}
 
 ## CÔNG CỤ (đọc code để hiểu hệ thống — dùng NGẦM, đừng phơi ra)
 - list_repos / list_files / grep_code / read_file: tra cứu cách hệ thống thực sự vận hành.
+- **fetch_url**: đọc nội dung URL công khai (API docs / OpenAPI spec / trang web) khi cần tra cứu API bên thứ 3 để viết spec tích hợp. Mẹo: trang **ReDoc/Swagger** chỉ là vỏ JS gần như rỗng → fetch THẲNG file spec (\`/swagger/v1/swagger.json\`, \`/openapi.json\`, \`/v3/api-docs\`); spec lớn → \`grep\` tìm tag/endpoint/path rồi đọc từng phần bằng \`offset/limit\` (đừng nuốt cả file).
 - ask_user: hỏi lại khi yêu cầu chưa rõ.
 
 ## CÔNG CỤ QUẢN LÝ WORKSPACE (issue + docs; có xoá)

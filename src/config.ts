@@ -46,6 +46,7 @@ export const config = {
     marketing: process.env.MKT_DB_URL || '',
     thg: process.env.THG_DB_URL || '',
     dhco: process.env.DHCO_DB_URL || '',
+    ecount: process.env.ECOUNT_DB_URL || '', // MySQL fullfill_db (tích hợp ecount/YunExpress)
   } as Record<string, string>,
   // Server thật (chỉ admin đọc LOG read-only qua SSH). Nguồn log duyệt sẵn — KHÔNG chạy lệnh tuỳ ý.
   servers: [
@@ -86,6 +87,16 @@ export const config = {
         { name: 'cron', label: 'Tác vụ định kỳ (thg-cron)', kind: 'docker', ref: 'thg-cron' },
         { name: 'nginx-access', label: 'Nginx access (luồng request user)', kind: 'file', ref: '/var/log/nginx/access.log' },
         { name: 'nginx-error', label: 'Nginx error', kind: 'file', ref: '/var/log/nginx/error.log' },
+      ],
+    },
+    {
+      key: 'ecount',
+      label: 'ecount — tích hợp YunExpress/warehouse (THG)',
+      ssh: { ...parseSsh(process.env.ECOUNT_SSH || 'root@103.200.20.200:22', 'root', 22),
+             identityFile: expandTilde(process.env.ECOUNT_SSH_KEY || '~/.ssh/id_ed25519') },
+      sources: [
+        { name: 'app', label: 'Ứng dụng tích hợp (yunexpress-app)', kind: 'docker', ref: 'yunexpress-app' },
+        { name: 'worker', label: 'Worker đồng bộ (yunexpress-worker)', kind: 'docker', ref: 'yunexpress-worker' },
       ],
     },
     {
@@ -156,6 +167,14 @@ export const config = {
       adminOnly: true,
       blurb: 'Hệ thống THG (thghub). Next.js. Có workspace issue hub riêng. Chỉ admin truy cập.',
     },
+    {
+      key: 'ecount',
+      label: 'ecount-integration (THG)',
+      path: resolve(CLONES, 'ecount-integration'),
+      branch: process.env.ECOUNT_BRANCH || 'main',
+      adminOnly: true,
+      blurb: 'Dịch vụ tích hợp ecount cho THG Hub: đồng bộ mảng vận chuyển (express/YunExpress) + kho (warehouse) giữa ecount và thghub. Node.js (server.js + worker.js), chạy docker yunexpress-app/worker. Đã go-live ổn định.',
+    },
     // Side projects (chưa có workspace) — chỉ admin, chỉ hỏi-đáp code.
     { key: 'video_ai', label: 'video_ai', path: resolve(CLONES, 'video_ai'), branch: process.env.VIDEO_AI_BRANCH || 'main', adminOnly: true, blurb: 'Side project: video_ai.' },
     { key: 'adg_database', label: 'adg_database', path: resolve(CLONES, 'adg_database'), branch: process.env.ADG_BRANCH || 'main', adminOnly: true, blurb: 'Side project: adg_database (repo tham chiếu AI-ask của ba.autonow).' },
@@ -186,8 +205,8 @@ export const projects: ProjectCfg[] = [
     repos: ['dhco'], workspaces: ['dhco'], dbKeys: ['dhco'], serverKeys: ['dhco'], adminOnly: true,
   },
   {
-    key: 'thghub', label: 'THG', blurb: 'Hệ thống THG (thghub).',
-    repos: ['thghub'], workspaces: ['thghub'], dbKeys: ['thg'], serverKeys: ['thg'], adminOnly: true,
+    key: 'thghub', label: 'THG', blurb: 'Hệ thống THG (thghub) + tích hợp ecount (express/warehouse).',
+    repos: ['thghub', 'ecount'], workspaces: ['thghub'], dbKeys: ['thg', 'ecount'], serverKeys: ['thg', 'ecount'], adminOnly: true,
   },
   {
     key: 'labs', label: 'Side Projects', blurb: 'Các side project chưa thành dự án chính — hỏi-đáp code + workspace chung (issue/docs).',
