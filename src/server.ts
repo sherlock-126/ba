@@ -98,15 +98,27 @@ app.post('/api/users', async (req, reply) => {
   } catch (e: any) { return reply.code(400).send({ error: e.message }); }
 });
 app.patch('/api/users/:id', async (req, reply) => {
-  const id = (req.params as any).id; const { role, active } = (req.body as any) ?? {};
+  const id = (req.params as any).id; const { role, active, allowedProjects } = (req.body as any) ?? {};
   const target = await getUserById(id); if (!target) return reply.code(404).send({ error: 'Không tìm thấy user' });
   if (id === req.user!.id && active === false) return reply.code(400).send({ error: 'Không thể tự khoá chính mình' });
   // chặn khoá / hạ quyền admin cuối cùng
   const removingAdmin = (active === false || role === 'member') && target.role === 'admin' && target.active;
   if (removingAdmin && (await countActiveAdmins()) <= 1) return reply.code(400).send({ error: 'Phải còn ít nhất 1 admin đang hoạt động' });
-  const u = await updateUser(id, { role: role === 'admin' || role === 'member' ? role : undefined, active: typeof active === 'boolean' ? active : undefined });
+  // allowedProjects: mảng key project hợp lệ (giới hạn phạm vi); [] hoặc null = bỏ giới hạn.
+  let ap: string[] | null | undefined;
+  if (allowedProjects === null || (Array.isArray(allowedProjects) && allowedProjects.length === 0)) ap = null;
+  else if (Array.isArray(allowedProjects)) {
+    const bad = allowedProjects.filter((k: any) => !projectByKey(String(k)));
+    if (bad.length) return reply.code(400).send({ error: 'Project không hợp lệ: ' + bad.join(', ') });
+    ap = allowedProjects.map(String);
+  }
+  const u = await updateUser(id, {
+    role: role === 'admin' || role === 'member' ? role : undefined,
+    active: typeof active === 'boolean' ? active : undefined,
+    ...(ap !== undefined ? { allowedProjects: ap } : {}),
+  });
   if (active === false) await killUserSessions(id); // khoá → đá session
-  await audit(req, 'update_user', target.email, JSON.stringify({ role, active }));
+  await audit(req, 'update_user', target.email, JSON.stringify({ role, active, allowedProjects: ap }));
   return { user: u };
 });
 app.post('/api/users/:id/reset-password', async (req, reply) => {
@@ -130,7 +142,7 @@ app.get('/api/audit', async (req) => ({ entries: await listAudit(Number((req.que
 // ── Conversations (theo owner) ──────────────────────────────────
 // Dự án (project) hiển thị cho user hiện tại (admin thấy cả adminOnly).
 app.get('/api/projects', async (req) => ({
-  projects: visibleProjects(req.user!.role === 'admin').map((p) => ({ key: p.key, label: p.label, blurb: p.blurb })),
+  projects: visibleProjects(req.user!.role === 'admin', req.user!.allowedProjects).map((p) => ({ key: p.key, label: p.label, blurb: p.blurb })),
 }));
 app.get('/api/conversations', async (req) => {
   const project = String((req.query as any)?.project || '') || undefined;
@@ -183,15 +195,19 @@ app.post('/api/chat', async (req, reply) => {
     const raw = reply.raw;
     raw.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     const send = (type: string, data: unknown) => { try { raw.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`); } catch { /* gone */ } };
+    // Heartbeat: ping SSE mỗi 15s để proxy (cloudflared) KHÔNG cắt kết nối khi agent bận lâu (tool/tạo file/nghĩ).
+    const ping = setInterval(() => { try { raw.write(': ping\n\n'); } catch { /* gone */ } }, 15000);
     const abortController = new AbortController();
     raw.on('close', () => abortController.abort());
-    let proj = projectByKey(String(body.project || '')) ?? projectByKey(DEFAULT_PROJECT);
-    if (proj?.adminOnly && actor.role !== 'admin') proj = projectByKey(DEFAULT_PROJECT);
+    const okKeys = new Set(visibleProjects(actor.role === 'admin', actor.allowedProjects).map((p) => p.key));
+    const wantKey = String(body.project || '');
+    const useKey = okKeys.has(wantKey) ? wantKey : (okKeys.has(DEFAULT_PROJECT) ? DEFAULT_PROJECT : [...okKeys][0]);
+    let proj = projectByKey(useKey);
     try {
       await runAgent({ messages: [{ role: 'user', content: userText }], abortController, emit: send, openFile, userId: actor.id, isAdmin: actor.role === 'admin', project: proj,
         onAudit: (action, target, detail) => appendAudit({ ts: Date.now(), actorId: actor.id, actorEmail: actor.email, action, target, detail }) });
       send('done', {});
-    } catch (e: any) { send('error', { message: String(e?.message ?? e) }); } finally { raw.end(); }
+    } catch (e: any) { send('error', { message: String(e?.message ?? e) }); } finally { clearInterval(ping); raw.end(); }
     return;
   }
   // Ảnh đính kèm (data URL), tối đa 4, mỗi ảnh ≤ 8MB.
@@ -205,18 +221,19 @@ app.post('/api/chat', async (req, reply) => {
   if (!userText && !images.length && !files.length) return reply.code(400).send({ error: 'message rỗng' });
 
   const isAdmin = req.user!.role === 'admin';
-  const visibleProj = new Set(visibleProjects(isAdmin).map((p) => p.key));
+  const visibleProj = new Set(visibleProjects(isAdmin, req.user!.allowedProjects).map((p) => p.key));
+  const fallbackProj = visibleProj.has(DEFAULT_PROJECT) ? DEFAULT_PROJECT : [...visibleProj][0];
   let conv = convId ? await getConversation(convId, owner) : undefined;
   if (!conv) {
-    // Dự án từ FE, validate theo quyền (không tin client); mặc định kientre.
+    // Dự án từ FE, validate theo quyền (không tin client); mặc định project khả dụng đầu.
     const reqProj = String(body.project || '');
-    const projKey = visibleProj.has(reqProj) ? reqProj : DEFAULT_PROJECT;
+    const projKey = visibleProj.has(reqProj) ? reqProj : fallbackProj;
     convId = randomBytes(8).toString('hex');
     conv = await createConversation(convId, owner, userText || files[0]?.name || '(đính kèm)', projKey);
   }
-  // Dự án dùng cho lượt này = dự án của hội thoại; chặn dùng dự án ngoài quyền.
-  let project = projectByKey(conv.project ?? DEFAULT_PROJECT);
-  if (project?.adminOnly && !isAdmin) project = projectByKey(DEFAULT_PROJECT);
+  // Dự án dùng cho lượt này = dự án của hội thoại; chặn dùng dự án ngoài phạm vi user.
+  let project = projectByKey(conv.project ?? fallbackProj);
+  if (!project || !visibleProj.has(project.key)) project = projectByKey(fallbackProj);
   await appendMessage(convId, { role: 'user', content: userText, ts: Date.now(), images: images.length ? images : undefined,
     files: files.length ? files.map((f: any) => ({ name: f.name, type: f.type })) : undefined }); // lưu tên/loại, không lưu data
   await audit(req, 'chat', convId, userText.slice(0, 500)); // nội dung câu hỏi (audit đầy đủ)
@@ -225,6 +242,8 @@ app.post('/api/chat', async (req, reply) => {
   const raw = reply.raw;
   raw.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
   const send = (type: string, data: unknown) => { try { raw.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`); } catch { /* gone */ } };
+  // Heartbeat: ping SSE mỗi 15s để proxy (cloudflared) KHÔNG cắt kết nối khi agent bận lâu (nhiều turn/tạo file lớn/trả lời dài).
+  const ping = setInterval(() => { try { raw.write(': ping\n\n'); } catch { /* gone */ } }, 15000);
   send('conversation', { id: convId });
   const abortController = new AbortController();
   raw.on('close', () => abortController.abort());
@@ -240,7 +259,7 @@ app.post('/api/chat', async (req, reply) => {
     // Lưu cả khi chỉ tạo file (không có text) để mở lại vẫn còn thẻ file.
     if (text || outFiles.length) await appendMessage(convId, { role: 'assistant', content: text, ts: Date.now(), outFiles: outFiles.length ? outFiles : undefined });
     send('done', { conversationId: convId });
-  } catch (e: any) { send('error', { message: String(e?.message ?? e) }); } finally { raw.end(); }
+  } catch (e: any) { send('error', { message: String(e?.message ?? e) }); } finally { clearInterval(ping); raw.end(); }
 });
 
 // ── Reverse-proxy /workspace/* → hub Side Projects (labs) trên :3700 (base path /workspace) ──

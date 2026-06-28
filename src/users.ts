@@ -13,6 +13,9 @@ export type Role = 'admin' | 'member';
 export type User = {
   id: string; email: string; passwordHash: string; role: Role;
   active: boolean; mustChangePassword: boolean; createdAt: number; lastLoginAt: number | null;
+  // Khoá phạm vi dự án: nếu set (mảng key project) → user CHỈ thấy/dùng các project này,
+  // kể cả khi role=admin (admin power nhưng giới hạn dự án). undefined/rỗng = không giới hạn (theo role).
+  allowedProjects?: string[];
 };
 
 let users: User[] | null = null;
@@ -69,10 +72,14 @@ export async function createUser(email: string, password: string, role: Role): P
   all.push(u); await persist(); return publicUser(u);
 }
 
-export async function updateUser(id: string, patch: { role?: Role; active?: boolean }): Promise<PublicUser | null> {
+export async function updateUser(id: string, patch: { role?: Role; active?: boolean; allowedProjects?: string[] | null }): Promise<PublicUser | null> {
   const all = await ref(); const u = all.find((x) => x.id === id); if (!u) return null;
   if (patch.role) u.role = patch.role;
   if (typeof patch.active === 'boolean') u.active = patch.active;
+  if ('allowedProjects' in patch) {
+    const ap = patch.allowedProjects;
+    if (ap && ap.length) u.allowedProjects = ap; else delete u.allowedProjects; // rỗng/null = bỏ giới hạn
+  }
   await persist(); return publicUser(u);
 }
 export async function setPassword(id: string, password: string, mustChange: boolean): Promise<boolean> {

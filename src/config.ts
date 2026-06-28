@@ -216,6 +216,7 @@ export const projects: ProjectCfg[] = [
 export function projectByKey(key: string): ProjectCfg | undefined {
   return projects.find((p) => p.key === key);
 }
-export function visibleProjects(isAdmin: boolean): ProjectCfg[] {
-  return projects.filter((p) => isAdmin || !p.adminOnly);
+export function visibleProjects(isAdmin: boolean, allowed?: string[] | null): ProjectCfg[] {
+  // role quyết định adminOnly; allowed (nếu có) cắt thêm phạm vi theo từng user.
+  return projects.filter((p) => (isAdmin || !p.adminOnly) && (!allowed?.length || allowed.includes(p.key)));
 }
